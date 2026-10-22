@@ -148,8 +148,8 @@ function buildGraph({ cfg, words, boot, title = 'GNU/Linux on Desmos' }) {
     sx.push(...t.xs, NaN); sy.push(...t.ys, NaN);
   }
   expr(`\\left(${listTex(sx)},${listTex(sy)}\\right)`, { folderId: fDisp, color: '#e2e8f0', lines: true, points: false, lineWidth: '1.3' });
-  // status line
-  expr(L`\left(-1,3.2\right)`, { folderId: fDisp, color: '#000000', showLabel: true, hidden: false, pointOpacity: '0', label: `${title}: \${n_{m}} million instructions, uptime \${u_{p}} s, \${t_{k}} ticks`, labelOrientation: 'right', labelSize: '1.2' });
+  // status line (a zero-size point: Desmos doesn't draw labels of points with opacity 0)
+  expr(L`\left(-1,2.2\right)`, { folderId: fDisp, color: '#000000', showLabel: true, hidden: false, pointSize: '0', label: `\${n_{m}} million instructions, uptime \${u_{p}} s, \${t_{k}} ticks`, labelOrientation: 'right', labelSize: '1.2' });
   expr(L`n_{m}=\operatorname{round}\left(\frac{S\left[46\right]}{10^{6}},2\right)`, { folderId: fDisp });
   expr(L`u_{p}=\operatorname{round}\left(\frac{S\left[44\right]}{10^{7}},1\right)`, { folderId: fDisp });
 
@@ -267,7 +267,7 @@ function buildGraph({ cfg, words, boot, title = 'GNU/Linux on Desmos' }) {
   const state = {
     version: 11,
     graph: {
-      viewport: { xmin: -4, ymin: -78, xmax: 84, ymax: 6 },
+      viewport: { xmin: -5, ymin: -78.25, xmax: 85, ymax: 6.75 },
       showGrid: false, showXAxis: false, showYAxis: false, xAxisNumbers: false, yAxisNumbers: false, squareAxes: true,
     },
     expressions: { list: ex, ticker: { handlerLatex: 'A_{t}', minStepLatex: '0', open: true, playing: false } },

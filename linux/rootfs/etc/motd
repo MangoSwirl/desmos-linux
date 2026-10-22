@@ -1,0 +1,6 @@
+
+Welcome to GNU/Linux on Desmos!
+  Linux kernel + GNU bash + GNU coreutils + GNU libc, running on an
+  RV32IMA CPU emulated entirely in Desmos expressions.
+  Try: ls /bin, uname -a, cat /proc/cpuinfo, echo $((6*7)), help
+

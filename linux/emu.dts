@@ -1,0 +1,38 @@
+/dts-v1/;
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "desmos,rv32";
+	model = "Desmos RV32IMA";
+
+	chosen {
+		bootargs = "console=hvc0";
+		linux,initrd-start = <INITRD_START>;
+		linux,initrd-end = <INITRD_END>;
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 RAM_SIZE>;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <10000000>;
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			status = "okay";
+			compatible = "riscv";
+			riscv,isa-base = "rv32i";
+			riscv,isa-extensions = "i", "m", "a", "zicsr", "zifencei", "zicntr";
+			mmu-type = "riscv,sv32";
+			cpu0_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+	};
+};

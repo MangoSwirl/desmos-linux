@@ -27,8 +27,9 @@ const S = {
   STOPF: 49, SCOUNTEREN: 50,
   WK: 51,  // page walk in progress: level + 4*acc + 16*(PTE address); 0 = none
   WVA: 52, // virtual address being translated
+  FI: 53,  // fence.i executed this batch: instruction fetch reads through the write log
 };
-const NS = 52;
+const NS = 53;
 const NT = 16; // TLB entries
 const TIMECMP_INIT = 2 ** 52;
 
@@ -46,10 +47,12 @@ const DD = {
 };
 const ND = 17;
 
-function build(cfg) {
-  const { ramSize, pageWords: PS, logMax: W, outMax: OM, chain } = cfg;
+// Build the CPU into program P (a new one, finished, if none is given).
+function build(cfg, P0) {
+  const { ramSize, pageWords: PS, logMax: W, outMax: OM, chain, dirtySets: DS = 32, dirtyWays: DW = 2 } = cfg;
+  const DM = DS * DW; // most pages a batch can write
   const NP = Math.ceil(ramSize / 4 / PS);
-  const P = new D.Program();
+  const P = P0 || new D.Program();
   // Parameter type inference: single upper-case letters are lists.
   const params = ps => ps.map(p => [p, p.length === 1 && p === p.toUpperCase() ? 'l' : 'n']);
   const fl = (name, ps, body) => { const d = P.func(name, params(ps), null, body); d.ret = 'l'; return d; };
@@ -84,13 +87,29 @@ function build(cfg) {
   const neg = a => flag(ge(a, K31));
 
   // ---------------------------------------------------------------- memory
-  // Committed RAM read: page p, 1-based offset o (binary search over pages).
-  const tree = (p, o, lo, hi) => {
-    if (hi - lo === 1) return idx(pages[lo], o);
+  // Committed RAM read: page p, 1-based offset o. Two levels: an inlined
+  // binary tree over groups of pages, whose leaves call one function per
+  // group that selects the page. The group functions are (trivially)
+  // recursive, which makes Desmos compile them separately instead of inlining
+  // them (memoized on their two number arguments). Inlining every page into
+  // the step would cost one closure per tree node per step.
+  const GS = Math.max(1, Math.ceil(Math.sqrt(NP))); // pages per group
+  const tree = (lo, hi, leaf, cmp) => {
+    if (hi - lo === 1) return leaf(lo);
     const mid = (lo + hi) >> 1;
-    return pw([lt(p, mid), tree(p, o, lo, mid)], tree(p, o, mid, hi));
+    return pw([lt(cmp, mid), tree(lo, mid, leaf, cmp)], tree(mid, hi, leaf, cmp));
   };
-  const Frp = fn('F_rp', ['p', 'o'], (p, o) => tree(p, o, 0, NP));
+  const groups = [];
+  for (let g = 0; g * GS < NP; g++) {
+    const lo = g * GS, hi = Math.min(NP, lo + GS);
+    // (undefined p takes the last branch, so even folding with junk terminates)
+    const def = fn(`F_m${g}`, ['p', 'o'], (p, o) => pw([ge(p, 0), tree(lo, hi, j => idx(pages[j], o), p)], [lt(p, 0), call(def, add(p, 1), o)], 0));
+    groups.push(def);
+  }
+  // (Reads with a garbage address happen, e.g. while a fetch misses the TLB;
+  // p is clamped so the groups' recursive case can never actually run.)
+  const Frp = fn('F_rp', ['p', 'o'], (p, o) => call(Frp2, max(p, 0), o));
+  const Frp2 = fn('F_rq', ['p', 'o'], (p, o) => tree(0, groups.length, g => call(groups[g], p, o), floor(div(p, GS))));
   const Frd = fn('F_rd', ['w'], w => call(Frp, floor(div(w, PS)), add(mod(w, PS), 1)));
   // Read through the batch write log (last write wins).
   const Flx = fn('F_lx', ['M', 'w'], (M, w) => pw([gt(length(M), 0), idx(M, length(M))], call(Frd, w)));
@@ -226,7 +245,8 @@ function build(cfg) {
   // The step on state (S, T, U) with batch log (A, V) and output O, where the
   // previous step's store (word index n_a, value n_v) and output char (n_o)
   // haven't been appended to A/V/O yet: reads check the pending store first.
-  const Fstep = fl('F_st', ['n', 'S', 'T', 'U', 'A', 'V', 'O', 'n_a', 'n_v', 'n_o'], (n, s, tv, te, A, V, O, psa, psv, poc) => {
+  // Y lists the pages written this batch (entry 1 is a dummy).
+  const Fstep = fl('F_st', ['n', 'S', 'T', 'U', 'A', 'V', 'O', 'Y', 'n_a', 'n_v', 'n_o'], (n, s, tv, te, A, V, O, Y, psa, psv, poc) => {
     const act = pw([le(n, 0), 0], [gt(sx(s, S.STOPF), 0), 0],
       [gt(add(length(A), flag(ge(psa, 0))), W), 0], [gt(add(length(O), flag(ge(poc, 0))), OM), 0], 1);
     const wk = sx(s, S.WK);
@@ -236,10 +256,14 @@ function build(cfg) {
   const Fd1 = fl('F_da', ['k', 'S', 'T', 'U', 'A', 'V', 'g', 'q', 'p', 'i', 'n_a', 'n_v'], (act, s, tv, te, A, V, wk, q, fpa, fwi, psa, psv) => {
     // fs = fetch status: 0 ok, 1 no fetch (walk or interrupt), 2 TLB miss, 3 access fault
     const fs = pw([gt(wk, 0), 1], [gt(q, 0), 1], [eq(fpa, -1), 2], [eq(ram(fpa), 0), 3], 0);
-    return call(Fd2, act, s, tv, te, A, V, wk, q, fs, floor(div(fwi, PS)), add(mod(fwi, PS), 1), psa, psv);
+    return call(Fd2, act, s, tv, te, A, V, wk, q, fs, fwi, call(Frp, floor(div(fwi, PS)), add(mod(fwi, PS), 1)), psa, psv);
   });
-  const Fd2 = fl('F_db', ['k', 'S', 'T', 'U', 'A', 'V', 'g', 'q', 'z', 'p', 'o', 'n_a', 'n_v'], (act, s, tv, te, A, V, wk, q, fs, fp, fo, psa, psv) =>
-    call(Fd3, act, s, tv, te, A, V, wk, q, fs, pw([eq(fs, 0), call(Frp, fp, fo)], 0), psa, psv));
+  // The committed-RAM fetch read (m) is unconditional (a garbage address still
+  // reads some word, ignored later). After a fence.i in this batch, fetch
+  // reads through the write log so newly stored code becomes visible.
+  const Fd2 = fl('F_db', ['k', 'S', 'T', 'U', 'A', 'V', 'g', 'q', 'z', 'i', 'm', 'n_a', 'n_v'], (act, s, tv, te, A, V, wk, q, fs, fwi, mr, psa, psv) =>
+    call(Fd3, act, s, tv, te, A, V, wk, q, fs,
+      pw([eq(sx(s, S.FI), 1), pw([eq(fwi, psa), psv], call(Flog, filter(V, eq(A, fwi)), mr))], mr), psa, psv));
   // Layer 2: decode.
   const Fd3 = fl('F_dc', ['k', 'S', 'T', 'U', 'A', 'V', 'g', 'q', 'z', 'w', 'n_a', 'n_v'], (act, s, tv, te, A, V, wk, q, fs, w, psa, psv) => {
     const op = mod(w, 128), d = mod(floor(div(w, 128)), 32), f3 = mod(floor(div(w, 4096)), 8);
@@ -274,9 +298,18 @@ function build(cfg) {
       // the single data read: PTE during a walk, else the memory operand
       const rw = pw([gt(wk, 0), widx(floor(div(wk, 16)))], [lt(ms, 5), -1],
         [eq(mk, 1), pw([eq(f3, 2), -1], widx(sub(pa, mod(pa, 4))))], widx(sub(pa, mod(pa, 4))));
-      return call(Fd6, act, s, tv, te, wk, q, fs, w, op, d, f3, r1, r2, f7, a, b, mk, immI, f5, va, acc, ms, pa, rw,
-        pw([lt(rw, 0), 0], [eq(rw, psa), psv], call(Fldp, filter(V, eq(A, rw)), floor(div(rw, PS)), add(mod(rw, PS), 1))));
+      return call(Fd5b, act, s, tv, te, A, V, wk, q, fs, w, op, d, f3, r1, r2, f7, a, b, mk, immI, f5, va, acc, ms, pa, rw, psa, psv,
+        floor(div(rw, PS)), add(mod(rw, PS), 1));
     });
+  // The committed-RAM read is unconditional too; only the log search is lazy.
+  const Fd5b = fl('F_dh', ['k', 'S', 'T', 'U', 'A', 'V', 'g', 'q', 'z', 'w', 'o', 'd', 'f', 'r', 'j', 'h', 'a', 'b', 'm', 'i', 'c', 'v', 'e', 'x', 'p', 'l', 'n_a', 'n_v', 'p_r', 'o_r'],
+    (act, s, tv, te, A, V, wk, q, fs, w, op, d, f3, r1, r2, f7, a, b, mk, immI, f5, va, acc, ms, pa, rw, psa, psv, rp, ro) =>
+      call(Fd5c, act, s, tv, te, A, V, wk, q, fs, w, op, d, f3, r1, r2, f7, a, b, mk, immI, f5, va, acc, ms, pa, rw, psa, psv, call(Frp, rp, ro)));
+  const Fd5c = fl('F_di', ['k', 'S', 'T', 'U', 'A', 'V', 'g', 'q', 'z', 'w', 'o', 'd', 'f', 'r', 'j', 'h', 'a', 'b', 'm', 'i', 'c', 'v', 'e', 'x', 'p', 'l', 'n_a', 'n_v', 'm_r'],
+    (act, s, tv, te, A, V, wk, q, fs, w, op, d, f3, r1, r2, f7, a, b, mk, immI, f5, va, acc, ms, pa, rw, psa, psv, mr) =>
+      call(Fd6, act, s, tv, te, wk, q, fs, w, op, d, f3, r1, r2, f7, a, b, mk, immI, f5, va, acc, ms, pa, rw,
+        pw([lt(rw, 0), 0], [eq(rw, psa), psv], call(Flog, filter(V, eq(A, rw)), mr))));
+  const Flog = fn('F_lw', ['M', 'm'], (M, mr) => pw([gt(length(M), 0), idx(M, length(M))], mr));
   // Layer 4: everything else, as scalars.
   const Fd6 = fl('F_df', ['k', 'S', 'T', 'U', 'g', 'q', 'z', 'w', 'o', 'd', 'f', 'r', 'j', 'h', 'a', 'b', 'm', 'i', 'c', 'v', 'e', 'x', 'p', 'l', 'y'],
     (act, s, tv, te, wk, q, fs, w, op, d, f3, r1, r2, f7, a, b, mk, immI, f5, va, acc, ms, pa, rw, rv) => {
@@ -406,12 +439,12 @@ function build(cfg) {
         sel([[X.WNEXT, S.WK], [X.WFILL, S.WK], [X.SWALK, S.WK],
           [X.ALU, qd], [X.JUMP, pw([eq(op, 0x63), -1], qd)], [X.LUI, qd], [X.AUIPC, qd], [X.LOAD, qd], [X.LR, qd], [X.SCOK, qd], [X.SCFAIL, qd], [X.AMO, qd],
           [X.SBITIMER, 11], [X.SBIPUT, 11], [X.SBIGET, 11], [X.SBINONE, 11], [X.SBIZERO, 11], [X.SBIHALT, 11], [X.SBIUNSUP, 11],
-          [X.SRET, S.PRIV], [X.WFI, S.TIME], [X.CSRR, qd], [X.CSRW, qd], [X.FENCEI, S.STOPF]], -1),
+          [X.SRET, S.PRIV], [X.WFI, S.TIME], [X.CSRR, qd], [X.CSRW, qd], [X.FENCEI, S.FI]], -1),
         sel([[X.WNEXT, add(add(2, mul(4, wacc)), mul(16, a2))], [X.WFILL, 0], [X.SWALK, add(add(1, mul(4, sacc)), mul(16, a1))],
           [X.ALU, alu], [X.JUMP, np], [X.LUI, sub(w, mod(w, 4096))], [X.AUIPC, u32(add(pc, sub(w, mod(w, 4096))))],
           [X.LOAD, lv], [X.LR, rv], [X.SCOK, 0], [X.SCFAIL, 1], [X.AMO, rv],
           [X.SBIGET, qin], [X.SBINONE, K32 - 1], [X.SBIUNSUP, K32 - 2],
-          [X.SRET, bit(st, 8)], [X.WFI, nt], [X.CSRR, old], [X.CSRW, old], [X.FENCEI, 2]], 0),
+          [X.SRET, bit(st, 8)], [X.WFI, nt], [X.CSRR, old], [X.CSRW, old], [X.FENCEI, 1]], 0),
         sel([[X.SWALK, S.WVA], [X.LR, S.RESV], [X.SCOK, S.RESV], [X.SCFAIL, S.RESV], [X.SBITIMER, S.TIMECMP], [X.SBIGET, S.QI],
           [X.SBIHALT, S.STOPF], [X.SBIUNSUP, 12], [X.SRET, S.SSTATUS], [X.WFI, S.STOPF], [X.CSRW, csrIdx(csr)]], -1),
         sel([[X.SWALK, sva], [X.LR, pa], [X.SCOK, -1], [X.SCFAIL, -1], [X.SBITIMER, D.fn('min', add(mul(sx(s, 12), K32), a0), TIMECMP_INIT)], [X.SBIGET, add(qi, 1)],
@@ -464,13 +497,15 @@ function build(cfg) {
   });
   const Fns3 = fl('F_nq', ['S', 'q', 'v', 'r', 'u', 'p', 'n', 'a', 'b', 'c', 'd', 't', 'e', 'f', 'g', 'h'],
     (s, q1, v1, q2, v2, qp, npc, qt, tmv, qi, irv, isT, pc, c, tv, st2) => {
+      // element i = x*(1 - m) + w, where m marks the fields being written and
+      // w holds their new values; x = S[i] is read only once.
       const i = D.V('i_x', 'n');
-      const x = idx(s, i);
-      const terms = [setAt(x, i, q1, v1), setAt(x, i, q2, v2), setAt(x, i, qp, npc), setAt(x, i, qt, tmv), setAt(x, i, qi, irv)];
-      const trapTerms = [setAt(x, i, S.SEPC, pc), setAt(x, i, S.SCAUSE, c), setAt(x, i, S.STVAL, tv),
-        setAt(x, i, S.SSTATUS, st2), setAt(x, i, S.PRIV, 1), setAt(x, i, S.WK, 0)];
+      const writes = [[q1, v1], [q2, v2], [qp, npc], [qt, tmv], [qi, irv]];
+      const trapWrites = [[S.SEPC, pc], [S.SCAUSE, c], [S.STVAL, tv], [S.SSTATUS, st2], [S.PRIV, 1], [S.WK, 0]];
       const sum = xs => xs.reduce((acc, y) => add(acc, y));
-      return D.comp(add(add(x, sum(terms)), mul(isT, sum(trapTerms))), i, Is);
+      const m = add(sum(writes.map(([q]) => ind(i, q))), mul(isT, sum(trapWrites.map(([q]) => ind(i, q)))));
+      const w = add(sum(writes.map(([q, v]) => mul(ind(i, q), v))), mul(isT, sum(trapWrites.map(([q, v]) => mul(ind(i, q), v)))));
+      return D.comp(add(mul(idx(s, i), sub(1, m)), w), i, Is);
     });
   // A write to TIME through Q1 (wfi) replaces the usual time+1.
   const Fns = fl('F_ns', ['S', 'D'], (s, Dd) => {
@@ -495,39 +530,73 @@ function build(cfg) {
   const Fno = fl('F_no', ['O', 'D'], (O, Dd) => pw([ge(idx(Dd, DD.OC), 0), join(O, list([idx(Dd, DD.OC)]))], O));
 
   // --------------------------------------------------------- batch loop
-  // Packed layout: [len(A), len(O)] ++ S ++ T ++ U ++ A ++ V ++ O.
-  const oS = 3, oT = oS + NS, oE = oT + NT, oA = oE + NT + 1;
-  const Fpk = fl('F_pk', ['S', 'T', 'U', 'A', 'V', 'O'], (s, tv, te, A, V, O) => join(list([length(A), length(O)]), s, tv, te, A, V, O));
+  // Packed layout: [len(C), len(O), len(Y)] ++ S ++ T ++ U ++ C ++ O ++ Y, where
+  // C is the write log with one number per entry (Desmos lists hold at most
+  // 10000 elements, too few for separate address and value lists):
+  // C = value + 2^32 * (slot * PS + offset), slot = the page's position in Y.
+  const oS = 4, oT = oS + NS, oE = oT + NT, oA = oE + NT + 1;
+  const Iy = P.global('I_y', 'l', range(1, DM + 1));
+  const Fenc = fl('F_ec', ['A', 'V', 'Y'], (A, V, Y) => {
+    const a = D.V('a_x', 'n');
+    const slotOf = x => sub(total(mul(slice(Iy, 1, length(Y)), D.fn('sign', sub(1, D.fn('sign', D.fn('abs', sub(Y, floor(div(x, PS))))))))), 1);
+    // (slot = index in Y minus 1, so the first real page is slot 1)
+    const keys = D.comp(add(mul(slotOf(a), PS), mod(a, PS)), a, slice(A, 2));
+    return add(slice(V, 2), mul(K32, keys));
+  });
+  const Fpk = fl('F_pk', ['S', 'T', 'U', 'A', 'V', 'O', 'Y'], (s, tv, te, A, V, O, Y) =>
+    pw([gt(length(A), 1), join(list([sub(length(A), 1), length(O), length(Y)]), s, tv, te, call(Fenc, A, V, Y), O, Y)],
+      join(list([0, length(O), length(Y)]), s, tv, te, O, Y)));
+  // Decode C (given Y) back into the log lists, with their dummy first entry.
+  const Fda_ = fl('F_xa', ['C', 'Y'], (C, Y) => {
+    const key = floor(div(C, K32));
+    return join(list([-1]), add(mul(D.lidx(Y, add(floor(div(key, PS)), 1)), PS), mod(key, PS)));
+  });
+  const Fdv_ = fl('F_xv', ['C'], C => join(list([0]), mod(C, K32)));
+  // Y gains the page of D's store if it's new.
+  const Fny = fl('F_ny', ['Y', 'D'], (Y, Dd) => {
+    const pg = floor(div(idx(Dd, DD.SA), PS));
+    return pw([lt(idx(Dd, DD.SA), 0), Y], [gt(length(filter(Y, eq(Y, pg))), 0), Y], join(Y, list([pg])));
+  });
+  // 1 if a store to word index a (if any) would write a new page whose set of
+  // dirty page slots (page mod DS) is full: the batch then ends with stop 7.
+  // (The dummy -1 in Y counts in set DS-1.)
+  const Fcf = fn('F_cf', ['a', 'Y'], (a, Y) => {
+    const pg = floor(div(a, PS)), st = mod(pg, DS);
+    return pw([lt(a, 0), 0], [gt(length(filter(Y, eq(Y, pg))), 0), 0],
+      [ge(sub(length(filter(Y, eq(mod(Y, DS), st))), ind(st, DS - 1)), DW), 1], 0);
+  });
   // The batch loop. D is the descriptor of the step about to be applied to
-  // (S, T, U, A, V, O). Each iteration applies it and computes the next one;
-  // F_d appears exactly once so the compiled expression stays small.
-  // The batch loop. D is the descriptor of the step about to be applied to
-  // (S, T, U, A, V, O). F_d applies it to S/T/U and computes the next step;
-  // its result is the next descriptor followed by the new S, T and U. The
-  // base-case test reads all of it, so Desmos evaluates the step eagerly
+  // (S, T, U, A, V, O, Y). Each iteration applies it and computes the next
+  // descriptor with F_d (which applies D to S/T/U itself). The base-case test
+  // reads all of the next descriptor, so Desmos evaluates the step eagerly
   // (computed only in the recursive branch, it would be lazy closures), and
   // `with` keeps the step a single copy in the compiled expression.
-  const Fd = fl('F_d', ['n', 'S', 'T', 'U', 'A', 'V', 'O', 'D'], (n, s, tv, te, A, V, O, Dd) =>
-    P.let('F_dl', [['s_n', call(Fns, s, Dd)], ['t_n', call(Fnt, tv, Dd)], ['u_n', call(Fnu, te, Dd)]], (s2, t2, u2) =>
-      join(call(Fstep, n, s2, t2, u2, A, V, O, idx(Dd, DD.SA), idx(Dd, DD.SV), idx(Dd, DD.OC)), s2, t2, u2)));
-  const xS = [ND + 1, ND + NS], xT = [ND + NS + 1, ND + NS + NT], xU = [ND + NS + NT + 1, ND + NS + 2 * NT + 1];
-  const Fg = fl('F_g', ['n', 'S', 'T', 'U', 'A', 'V', 'O', 'D'], (n, s, tv, te, A, V, O, Dd) => {
-    const [x2, a2, v2, o2] = [['x_2', 'l'], ['a_2', 'l'], ['v_2', 'l'], ['o_2', 'l']].map(([nm, t]) => D.V(nm, t));
-    const binds = [[x2, call(Fd, n, s, tv, te, A, V, O, Dd)], [a2, call(Fna, A, Dd)], [v2, call(Fnv, V, Dd)], [o2, call(Fno, O, Dd)]];
-    const sl = r => slice(x2, r[0], r[1]);
-    return D.withB(binds, pw([eq(add(idx(x2, DD.ACT), mul(0, total(x2))), 0), call(Fpk, sl(xS), sl(xT), sl(xU), a2, v2, o2)],
-      call(Fg, sub(n, 1), sl(xS), sl(xT), sl(xU), a2, v2, o2, slice(x2, 1, ND))));
+  const Fd = fl('F_d', ['n', 'S', 'T', 'U', 'A', 'V', 'O', 'Y', 'D'], (n, s, tv, te, A, V, O, Y, Dd) =>
+    call(Fstep, n, call(Fns, s, Dd), call(Fnt, tv, Dd), call(Fnu, te, Dd), A, V, O, Y, idx(Dd, DD.SA), idx(Dd, DD.SV), idx(Dd, DD.OC)));
+  const Fg = fl('F_g', ['n', 'S', 'T', 'U', 'A', 'V', 'O', 'Y', 'D'], (n, s, tv, te, A, V, O, Y, Dd) => {
+    const names = [['s_2', 'l'], ['t_2', 'l'], ['u_2', 'l'], ['a_2', 'l'], ['v_2', 'l'], ['o_2', 'l'], ['y_2', 'l']].map(([nm, t]) => D.V(nm, t));
+    const d2 = D.V('d_2', 'l');
+    const binds = [call(Fns, s, Dd), call(Fnt, tv, Dd), call(Fnu, te, Dd), call(Fna, A, Dd), call(Fnv, V, Dd), call(Fno, O, Dd), call(Fny, Y, Dd)].map((x, i) => [names[i], x]);
+    binds.push([d2, call(Fd, n, s, tv, te, A, V, O, Y, Dd)]);
+    const [s2, ...rest] = names;
+    return D.withB(binds, pw([eq(add(idx(d2, DD.ACT), mul(0, total(d2))), 0), call(Fpk, ...names)],
+      [gt(call(Fcf, idx(d2, DD.SA), names[6]), 0), call(Fpk, add(s2, mul(sub(7, idx(s2, S.STOPF)), ind(Is, S.STOPF))), ...rest)],
+      call(Fg, sub(n, 1), ...names, d2)));
   });
   // Run one chain from a packed state.
-  const Flg = fl('F_lg', ['S', 'T', 'U', 'A', 'V', 'O'], (s, tv, te, A, V, O) =>
-    call(Fg, chain, s, tv, te, A, V, O, N0));
-  const Flf = fl('F_lf', ['X', 'm', 'k'], (X, m, k) => call(Flg,
-    slice(X, oS, oT - 1), slice(X, oT, oE - 1), slice(X, oE, oA - 1),
-    slice(X, oA, add(oA - 1, m)), slice(X, add(oA, m), add(oA - 1, mul(2, m))), slice(X, add(oA, mul(2, m)), add(add(oA - 1, mul(2, m)), k))));
+  const Flg = fl('F_lg', ['S', 'T', 'U', 'A', 'V', 'O', 'Y'], (s, tv, te, A, V, O, Y) =>
+    call(Fg, chain, s, tv, te, A, V, O, Y, N0));
+  const Flf = fl('F_lf', ['X', 'm', 'k', 'y'], (X, m, k, y) => {
+    const oO = add(oA, m), oY = add(oO, k);
+    return call(Flf2, slice(X, oS, oT - 1), slice(X, oT, oE - 1), slice(X, oE, oA - 1),
+      pw([gt(m, 0), slice(X, oA, sub(oO, 1))], list([])), slice(X, oO, sub(oY, 1)), slice(X, oY, add(oY, sub(y, 1))));
+  });
+  const Flf2 = fl('F_lh', ['S', 'T', 'U', 'C', 'O', 'Y'], (s, tv, te, C, O, Y) =>
+    call(Flg, s, tv, te, call(Fda_, C, Y), call(Fdv_, C), O, Y));
   // Outer loop: k more chains (stops early when the batch stops).
   const Fol = fl('F_ol', ['k', 'X'], (k, X) => pw(
-    [le(k, 0), X], [gt(idx(X, oS - 1 + S.STOPF), 0), X], [gt(idx(X, 1), W), X], [gt(idx(X, 2), OM), X],
-    call(Fol, sub(k, 1), call(Flf, X, idx(X, 1), idx(X, 2)))));
+    [le(k, 0), X], [gt(idx(X, oS - 1 + S.STOPF), 0), X], [ge(idx(X, 1), W), X], [gt(idx(X, 2), OM), X],
+    call(Fol, sub(k, 1), call(Flf, X, idx(X, 1), idx(X, 2), idx(X, 3)))));
 
   // ------------------------------------------------------ commit helpers
   // Merge the write log (A = word indices, V = values; entry 1 is a dummy)
@@ -539,13 +608,15 @@ function build(cfg) {
   const Fms = fl('F_ms', ['Y', 'Z'], (Y, Z) => call(Fmt, D.sort(Y), D.sort(Z, Y)));
   const Fmr = fl('F_mr', ['G', 'j', 'A', 'V', 'K'], (Pg, j, A, V, K) =>
     call(Fms, join(Kp, add(mul(sub(D.lidx(A, K), mul(j, PS)), W + 2), K)), join(Pg, D.lidx(V, K))));
+  // F_mp is (trivially) recursive so that Desmos compiles it once as a
+  // separate function instead of inlining it into every page's action.
   const Fmp = fl('F_mp', ['G', 'j', 'A', 'V'], (Pg, j, A, V) =>
-    call(Fmr, Pg, j, A, V, filter(range(1, length(A)), eq(floor(div(A, PS)), j))));
+    pw([ge(j, 0), call(Fmr, Pg, j, A, V, filter(range(1, length(A)), eq(floor(div(A, PS)), j)))], [lt(j, 0), call(Fmp, Pg, add(j, 1), A, V)], Pg));
 
-  P.finish();
+  if (!P0) P.finish();
   return {
     prog: P, NP, NS, NT, layout: { oS, oT, oE, oA }, S,
-    fns: { Fol, Fpk, Flf, Flg, Fg, Frd, Fld, Fmp },
+    fns: { Fol, Fpk, Flf, Flg, Fg, Frd, Fld, Fmp, Fda_, Fdv_ },
     globals: { Is, It, Iu, Bp, TV0, TE0, Q, pages },
     cfg: { ...cfg, NP },
   };

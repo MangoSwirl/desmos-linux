@@ -60,6 +60,8 @@ const desc = {
     outMax: Number(arg('--out-max', 256)),
     chain: Number(arg('--chain', 2000)),
     outer: Number(arg('--outer', 4)),
+    dirtySets: Number(arg('--dirty-sets', 32)),
+    dirtyWays: Number(arg('--dirty-ways', 2)),
   },
 };
 fs.writeFileSync(path.join(out, 'image.json'), JSON.stringify(desc, null, 2));

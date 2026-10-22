@@ -16,7 +16,8 @@ const RAM_BASE = 0x80000000;
 
 // Stop reasons (also used by the Desmos graph).
 const MISS = -1000; // translate(): TLB miss, start a page walk
-const STOP = { NONE: 0, LIMIT: 1, FENCEI: 2, WFI: 3, LOGFULL: 4, OUTFULL: 5, HALT: 6 };
+const SET_CONFLICT = new Error('dirty page set conflict');
+const STOP = { NONE: 0, LIMIT: 1, WFI: 3, LOGFULL: 4, OUTFULL: 5, HALT: 6, DIRTY: 7 };
 
 const CSR = {
   SSTATUS: 0x100, SIE: 0x104, STVEC: 0x105, SCOUNTEREN: 0x106, SENVCFG: 0x10a,
@@ -26,13 +27,19 @@ const CSR = {
 const SSTATUS_MASK = (1 << 1) | (1 << 5) | (1 << 8) | (1 << 18) | (1 << 19);
 
 class Machine {
-  constructor({ ramSize, logMax = 1024, outMax = 256, tlbSize = 16 }) {
+  constructor({ ramSize, logMax = 1024, outMax = 256, tlbSize = 16, pageWords = 4096, dirtySets = 32, dirtyWays = 2 }) {
     this.ramSize = ramSize;
     this.ramWords = ramSize >>> 2;
     this.mem = new Uint32Array(this.ramWords);
     this.logMax = logMax;
     this.outMax = outMax;
     this.tlbSize = tlbSize;
+    this.pageWords = pageWords;
+    // Pages written in a batch are committed through dirtySets * dirtyWays
+    // slots: page p may only use the slots of set p mod dirtySets. A batch ends
+    // before a store to a new page whose set is full.
+    this.dirtySets = dirtySets; this.dirtyWays = dirtyWays;
+    this.dirty = new Set();
     this.x = new Array(32).fill(0);
     this.pc = RAM_BASE;
     this.priv = 1; // 1 = S, 0 = U
@@ -40,6 +47,7 @@ class Machine {
     this.sscratch = 0; this.sepc = 0; this.scause = 0; this.stval = 0; this.satp = 0;
     this.time = 0; this.timecmp = 2 ** 52; this.instret = 0;
     this.wk = 0; this.wva = 0; // page walk in progress (see walkStep)
+    this.fi = 0; // fence.i seen in this batch
     this.resv = -1;
     this.tlbV = new Array(tlbSize).fill(-1);
     this.tlbE = new Array(tlbSize).fill(0);
@@ -63,10 +71,19 @@ class Machine {
     const v = this.logMap.get(wi);
     return v === undefined ? this.mem[wi] : v;
   }
-  fetchWord(pa) { return this.mem[(pa - RAM_BASE) >>> 2]; }
+  // Instruction fetch reads committed RAM, except after a fence.i in this
+  // batch, when it reads through the write log.
+  fetchWord(pa) { return this.fi ? this.readWord(pa) : this.mem[(pa - RAM_BASE) >>> 2]; }
   writeWord(pa, v) {
     const wi = (pa - RAM_BASE) >>> 2;
+    const pg = Math.floor(wi / this.pageWords);
+    if (!this.dirty.has(pg)) {
+      let n = 0;
+      for (const q of this.dirty) if (q % this.dirtySets === pg % this.dirtySets) n++;
+      if (n >= this.dirtyWays) throw SET_CONFLICT;
+    }
     this.logAddr.push(wi); this.logVal.push(v >>> 0); this.logMap.set(wi, v >>> 0);
+    this.dirty.add(Math.floor(wi / this.pageWords));
   }
   flush(pageWords) {
     const dirty = new Set();
@@ -330,7 +347,7 @@ class Machine {
         this.setRd(rd, v); break;
       }
       case 0x0f:
-        if (f3 === 1) this.stop = STOP.FENCEI;
+        if (f3 === 1) this.fi = 1;
         else if (f3 !== 0) return ill();
         break;
       case 0x2f: {
@@ -445,8 +462,17 @@ class Machine {
   runBatch(limit, pageWords) {
     let n = 0;
     this.stop = STOP.NONE;
+    this.fi = 0;
+    this.dirty.clear();
     while (n < limit && this.stop === STOP.NONE && !this.halted) {
-      this.step();
+      try {
+        this.step();
+      } catch (e) {
+        if (e !== SET_CONFLICT) throw e;
+        // nothing but the counters changes before a store: undo them
+        this.time -= 1; this.instret -= 1;
+        this.stop = STOP.DIRTY; break;
+      }
       n++;
     }
     this.flush(pageWords);

@@ -1,0 +1,7 @@
+<!doctype html><script>
+// Dev helper: fetch a file from this server and hand it to the desmos.com tab that opened us,
+// and POST anything that tab sends back as {upload: name, text} into <root>/uploads/.
+const f = new URLSearchParams(location.search).get('f');
+if (f) fetch(f).then(r => r.text()).then(t => { window.opener.postMessage({ relay: f, text: t }, '*'); document.title = 'sent ' + t.length; });
+addEventListener('message', e => { if (e.data && e.data.upload) fetch('/' + e.data.upload, { method: 'POST', body: e.data.text }); });
+</script>

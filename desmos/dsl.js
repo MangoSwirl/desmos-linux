@@ -231,7 +231,8 @@ const RT = {
   floor: a => (Array.isArray(a) ? a.map(Math.floor) : Math.floor(a)),
   abs: a => (Array.isArray(a) ? a.map(Math.abs) : Math.abs(a)),
   pow: (a, b) => RT.bc((x, y) => Math.pow(x, y), a, b),
-  idx(l, i) { return i >= 1 && i <= l.length && Number.isInteger(i) ? l[i - 1] : NaN; },
+  // Desmos floors list indices: (floor(i) >= 1 && floor(i) <= len) ? L[floor(i)-1] : undefined
+  idx(l, i) { const f = Math.floor(i); return f >= 1 && f <= l.length ? l[f - 1] : NaN; },
   slice(l, a, b) {
     if (b === undefined) b = l.length;
     if (b < a) { // Desmos ranges count downwards

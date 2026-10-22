@@ -22,7 +22,7 @@ function setup() {
   const imagePath = process.argv[2];
   let m, desc;
   if (imagePath === '--tiny') {
-    m = new Machine({ ramSize: 64 << 10, logMax: 256, outMax: 64 });
+    m = new Machine({ ramSize: 64 << 10, logMax: 256, outMax: 64, pageWords: 1024, dirtySets: 4, dirtyWays: 2 });
     m.mem[0] = 0x00150513; m.mem[1] = 0xffdff06f;
     desc = { params: { pageWords: 1024, logMax: 256, outMax: 64 }, ramSize: 64 << 10 };
   } else {
@@ -32,6 +32,7 @@ function setup() {
   const cfg = {
     ramSize: m.ramSize, pageWords: params.pageWords || 4096, logMax: m.logMax, outMax: m.outMax,
     chain: Number(arg('--chain', params.chain || 2000)), outer: Number(arg('--outer', params.outer || 2)),
+    dirtySets: m.dirtySets, dirtyWays: m.dirtyWays,
   };
   return { m, cfg };
 }
@@ -56,17 +57,22 @@ function main() {
   let out = '';
   for (let t = 0; t < ticks; t++) {
     // --- Desmos side: one tick = F_ol(outer, pack) then commit.
-    const X = F('F_ol')(cfg.outer, F('F_pk')(S, T, U, [-1], [0], [-1]));
-    const m1 = X[0], k1 = X[1];
+    const X = F('F_ol')(cfg.outer, F('F_pk')(S, T, U, [-1], [0], [-1], [-1]));
+    const m1 = X[0], k1 = X[1], y1 = X[2];
     const S2 = X.slice(oS - 1, oT - 1), T2 = X.slice(oT - 1, oE - 1), U2 = X.slice(oE - 1, oA - 1);
-    const A = X.slice(oA - 1, oA - 1 + m1), V = X.slice(oA - 1 + m1, oA - 1 + 2 * m1), O = X.slice(oA - 1 + 2 * m1, oA - 1 + 2 * m1 + k1);
-    const dirty = [...new Set(A.slice(1).map(a => Math.floor(a / PS)))];
+    const Cl = X.slice(oA - 1, oA - 1 + m1), O = X.slice(oA - 1 + m1, oA - 1 + m1 + k1);
+    const Y = X.slice(oA - 1 + m1 + k1, oA - 1 + m1 + k1 + y1);
+    const A = F('F_xa')(Cl, Y), V = F('F_xv')(Cl);
+    const dirty = Y.slice(1);
+    const dirtyFromLog = [...new Set(A.slice(1).map(a => Math.floor(a / PS)))];
+    if (dirtyFromLog.length !== dirty.length || dirtyFromLog.some(j => !dirty.includes(j))) throw new Error('dirty page list mismatch ' + JSON.stringify([dirty, dirtyFromLog]));
     for (const j of dirty) {
       const merged = F('F_mp')(pages[j], j, A, V);
       if (merged.length !== PS) throw new Error(`merge produced ${merged.length} words for page ${j}`);
       pages[j] = merged; js.set['P_' + j](merged);
     }
     S = S2.slice(); if (S[CPU.S.STOPF - 1] !== 6) S[CPU.S.STOPF - 1] = 0;
+    S[CPU.S.FI - 1] = 0;
     T = T2; U = U2;
     // --- reference side
     const n = m.runBatch(stepsPerTick, PS);
@@ -76,7 +82,7 @@ function main() {
     const errs = [];
     const refS = refState(m);
     for (let i = 0; i < refS.length; i++) {
-      if (i === CPU.S.STOPF - 1) continue;
+      if (i === CPU.S.STOPF - 1 || i === CPU.S.FI - 1) continue;
       if (refS[i] !== S[i] && !(Number.isNaN(refS[i]) && Number.isNaN(S[i]))) errs.push(`S[${i + 1}] desmos=${S[i]} ref=${refS[i]}`);
     }
     for (let i = 0; i < CPU.NT; i++) {
@@ -110,7 +116,7 @@ function refState(m) {
   s[S.SSIP - 1] = m.ssip; s[S.STVEC - 1] = m.stvec; s[S.SSCRATCH - 1] = m.sscratch; s[S.SEPC - 1] = m.sepc;
   s[S.SCAUSE - 1] = m.scause; s[S.STVAL - 1] = m.stval; s[S.SATP - 1] = m.satp; s[S.TIME - 1] = m.time;
   s[S.TIMECMP - 1] = m.timecmp; s[S.INSTRET - 1] = m.instret; s[S.RESV - 1] = m.resv; s[S.QI - 1] = m.inputPos;
-  s[S.SCOUNTEREN - 1] = m.scounteren; s[S.WK - 1] = m.wk; s[S.WVA - 1] = m.wva;
+  s[S.SCOUNTEREN - 1] = m.scounteren; s[S.WK - 1] = m.wk; s[S.WVA - 1] = m.wva; s[S.FI - 1] = m.fi;
   return s;
 }
 

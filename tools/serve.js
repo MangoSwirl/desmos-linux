@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // Static file server used to push generated graphs into a desmos.com tab
-// during development (fetch from the page, then Calc.setState).
+// during development. desmos.com's CSP blocks fetching from the page itself,
+// so the tab opens /relay.html (tools/relay.html), which fetches the file and
+// posts it back to the opener.
+//   node tools/serve.js build 8765
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -12,8 +15,9 @@ http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Private-Network', 'true');
   res.setHeader('Access-Control-Allow-Headers', '*');
   if (req.method === 'OPTIONS') { res.end(); return; }
-  const p = path.join(root, decodeURIComponent(req.url.split('?')[0]));
-  if (!p.startsWith(root)) { res.statusCode = 403; res.end(); return; }
+  const url = decodeURIComponent(req.url.split('?')[0]);
+  const p = url === '/relay.html' ? path.join(__dirname, 'relay.html') : path.join(root, url);
+  if (url !== '/relay.html' && !p.startsWith(root)) { res.statusCode = 403; res.end(); return; }
   if (req.method === 'POST') { // uploads land in <root>/uploads/
     const dest = path.join(root, 'uploads', path.basename(p));
     fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -24,7 +28,7 @@ http.createServer((req, res) => {
   }
   fs.readFile(p, (err, data) => {
     if (err) { res.statusCode = 404; res.end('not found'); return; }
-    res.setHeader('Content-Type', p.endsWith('.json') ? 'application/json' : 'text/plain');
+    res.setHeader('Content-Type', p.endsWith('.json') ? 'application/json' : p.endsWith('.html') ? 'text/html' : 'text/plain');
     res.end(data);
   });
 }).listen(port, '127.0.0.1', () => console.log(`serving ${root} on http://127.0.0.1:${port}`));

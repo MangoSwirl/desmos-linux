@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Static file server used to push generated graphs into a desmos.com tab
-// during development. desmos.com's CSP blocks fetching from the page itself,
-// so the tab opens /relay.html (tools/relay.html), which fetches the file and
-// posts it back to the opener.
+// during development. Browsers can block an https page from fetching a local
+// http server, so the tab opens /relay.html (tools/relay.html), which fetches
+// the file from the same origin and posts it back to the opener.
 //   node tools/serve.js build 8765
 'use strict';
 const http = require('http');

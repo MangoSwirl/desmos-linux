@@ -56,24 +56,47 @@ a 768-condition piecewise cap, and constant folding of argument-free actions).
 
 ## Running it
 
-Build the graph (see below), then load it into a desmos.com tab with the dev server:
+Open https://www.desmos.com/calculator, open the developer console, and run this to load the
+latest [release](https://github.com/MangoSwirl/desmos-linux/releases):
+
+```js
+fetch('https://api.github.com/repos/MangoSwirl/desmos-linux/releases/latest')
+  .then(r => r.json())
+  .then(r => fetch(`https://raw.githubusercontent.com/MangoSwirl/desmos-linux/${r.tag_name}/graph.json`))
+  .then(r => r.json())
+  .then(s => Calc.setState(s));
+```
+
+Then press ▶ on the ticker at the top of the expression list. Kernel output starts at about tick
+176, and the prompt appears at about tick 860.
+
+The slider `k_o` sets how many 5000-step chains run per tick. Raising it from 4 to 8 cuts the boot
+to about 530 ticks, and 12 to about 470. Beyond that a tick almost always stops early because its
+write log is full. Each tick takes longer, though, and the keyboard only responds between ticks.
+
+Once the graph is loaded you can save it to your Desmos account, which gives it a shareable link.
+
+Each push to `main` that changes the build builds everything from source in GitHub Actions
+([.github/workflows/release.yml](.github/workflows/release.yml)), checks that the image boots to
+the prompt in the reference machine, and publishes a release. The release tag adds `graph.json` to
+the tree so it can be fetched from raw.githubusercontent.com; release downloads can't be fetched
+from another site.
+
+To load a graph you built yourself, serve it locally:
 
 ```sh
 node tools/serve.js build 8765
 ```
 
-On https://www.desmos.com/calculator, open the developer console and run:
+and run this in the desmos.com console instead:
 
 ```js
 addEventListener('message', e => e.data.relay && Calc.setState(JSON.parse(e.data.text)));
 open('http://127.0.0.1:8765/relay.html?f=graph.json');
 ```
 
-(desmos.com's content security policy stops the page from fetching the file directly, so a relay
-page fetches it and posts it back.) Then press ▶ on the ticker at the top of the expression list.
-Kernel output starts at about tick 176, and the prompt appears at about tick 860.
-
-Once the graph is loaded you can save it to your Desmos account, which gives it a shareable link.
+The relay page fetches the file from the same origin and posts it back, because browsers can block
+an https page from fetching a local http server directly.
 
 Memory: the Desmos evaluator worker uses about 1–2.8 GB of JS heap while it runs, which fits
 desktop Chrome's limit of roughly 4 GB per thread.
@@ -86,7 +109,7 @@ bash-5.2.37 and coreutils-9.10 sources (the last three under `~/br/src/`).
 
 ```sh
 P=$PWD   # this repo
-docker build -t rvbuild linux/toolchain
+docker build --build-arg UID=$(id -u) -t rvbuild linux/toolchain
 
 # toolchain: rv32ima / ilp32, glibc, GCC 14
 docker run --rm -v ~/br:/w -v $P:/p rvbuild sh -c \

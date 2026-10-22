@@ -1,0 +1,115 @@
+# Build the kernel, userland and Desmos graph from source on every push to main that touches them,
+# boot the result in the reference machine, and publish it as a GitHub release.
+#
+# The release tag points at a commit (child of the source commit, not on main) that adds graph.json
+# at the repo root, so a desmos.com tab can load it from raw.githubusercontent.com, which sends CORS
+# headers. Release asset downloads don't, so the attached graph.json is only for downloading.
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: [desmos/**, emu/**, linux/**, tools/**, .github/workflows/release.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  BUILDROOT: buildroot-2026.05.3
+  LINUX: linux-7.0.14
+  BASH: bash-5.2.37
+  COREUTILS: coreutils-9.10
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Build the toolchain image
+        run: docker build --build-arg UID=$(id -u) -t rvbuild linux/toolchain
+
+      - name: Download sources
+        run: |
+          mkdir -p ~/br/src && cd ~/br
+          curl -fsSLO https://buildroot.org/downloads/$BUILDROOT.tar.xz
+          curl -fsSL -o src/$LINUX.tar.xz https://cdn.kernel.org/pub/linux/kernel/v7.x/$LINUX.tar.xz
+          curl -fsSL -o src/$BASH.tar.gz https://ftp.gnu.org/gnu/bash/$BASH.tar.gz
+          curl -fsSL -o src/$COREUTILS.tar.xz https://ftp.gnu.org/gnu/coreutils/$COREUTILS.tar.xz
+          sha256sum -c <<EOF
+          f43f1627082a45848f73083b3b8d59f32bb4c77a449a8ead8a2a1f91849dea00  $BUILDROOT.tar.xz
+          de9999b784d2293f00d39c62d8f92a08ab8a54bc4e80ffd250a0c09cb07a0f98  src/$LINUX.tar.xz
+          9599b22ecd1d5787ad7d3b7bf0c59f312b3396d1e281175dd1f8a4014da621ff  src/$BASH.tar.gz
+          16535a9adf0b10037364e2d612aad3d9f4eca3a344949ced74d12faf4bd51d25  src/$COREUTILS.tar.xz
+          EOF
+          tar xf $BUILDROOT.tar.xz
+          for f in src/*.tar.*; do tar xf $f -C src; done
+
+      # Only out/host is kept: it holds the cross compiler and sysroot (about 400 MB, versus 7 GB
+      # for all of Buildroot's build directories).
+      - name: Restore the toolchain
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/br/out/host
+          key: toolchain-${{ env.BUILDROOT }}-${{ hashFiles('linux/toolchain/**') }}
+
+      - name: Build the toolchain (rv32ima / ilp32, glibc, GCC 14)
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: |
+          docker run --rm -v ~/br:/w -v $PWD:/p rvbuild sh -c \
+            "cd /w/$BUILDROOT && make O=/w/out BR2_DEFCONFIG=/p/linux/toolchain/buildroot.defconfig defconfig && make O=/w/out toolchain" \
+            > toolchain.log 2>&1 || { tail -100 toolchain.log; exit 1; }
+          rm -rf ~/br/out/build
+
+      - name: Build the kernel, userland and initramfs
+        run: |
+          docker run --rm -v ~/br:/w -v $PWD:/p rvbuild /p/linux/build-kernel.sh
+          docker run --rm -v ~/br:/w -v $PWD:/p rvbuild /p/linux/build-userland.sh
+          docker run --rm -v ~/br:/w -v $PWD:/p rvbuild /p/linux/mkinitramfs.sh
+
+      - name: Build the graph
+        run: |
+          node tools/mkimage.js --kernel ~/br/kbuild/arch/riscv/boot/Image --initrd ~/br/initramfs.cpio \
+            --ram 12M --out build/k7 --log-max 9400 --chain 5000 --outer 4
+          node tools/build.js build/k7/image.json build/graph.json
+
+      - name: Boot to the bash prompt in the reference machine
+        run: |
+          node emu/boot.js build/k7/image.json --input 'uname -a\n' --until 'riscv32 GNU/Linux' \
+            --max-steps 60000000 | tee boot.log
+          grep -q 'root@desmos:~#' boot.log && grep -q 'riscv32 GNU/Linux' boot.log
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: build-${{ github.run_number }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          cp build/graph.json graph.json
+          git add -f graph.json
+          git commit -q -m "$TAG: graph.json built from ${GITHUB_SHA::7}"
+          git tag $TAG
+          git push origin $TAG
+          url=https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$TAG/graph.json
+          cat > notes.md <<EOF
+          Built from ${GITHUB_SHA::7}. To load this build, open https://www.desmos.com/calculator, then run this in the developer console:
+
+          \`\`\`js
+          fetch('$url').then(r => r.json()).then(s => Calc.setState(s));
+          \`\`\`
+
+          Then press ▶ on the ticker at the top of the expression list.
+          EOF
+          gh release create $TAG build/graph.json --verify-tag --latest --title "Build ${{ github.run_number }}" --notes-file notes.md

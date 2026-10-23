@@ -7,15 +7,16 @@ keyboard in the viewport. The computer is made entirely of ordinary Desmos expre
 (RV32IMA, Sv32 MMU) CPU, 12 MB of RAM held in lists, a VT100-style terminal, and a ticker action
 that drives it all. It needs nothing beyond the stock calculator at desmos.com/calculator.
 
-It is real and it is very slow. Booting to the prompt takes about 860 ticks, around 2 h 20 min in
-desktop Chrome, and starting a program such as `uname -a` takes another 60 or so ticks.
+It is real and it is very slow. Booting to the prompt takes about 860 ticks: around 2 h 20 min in
+desktop Chrome, or 1 h 40 min in headless Chrome on an AWS m7i.xlarge. Starting a program such as
+`uname -a` takes another 60 or so ticks.
 
-![The graph at the bash prompt after running uname -a](assets/screenshot.png)
+![desmos.com/calculator showing the graph at the bash prompt after uname -a and cat /proc/cpuinfo](assets/screenshot.png)
 
-[Time lapse of a full boot (33 s)](assets/timelapse.mp4): power-on, kernel messages, `/init`, the
-welcome message, the bash prompt at tick 859, then a typo and `uname -a`. Every frame comes from the
-terminal state recorded from a real run in desmos.com/calculator, drawn with the graph's own font
-strokes.
+[Time lapse of a full boot (46 s)](assets/timelapse.mp4): power-on, kernel messages, `/init`, the
+welcome message, the bash prompt at tick 858, then `uname -a` and `cat /proc/cpuinfo` typed on the
+on-screen keyboard. Each frame is a browser screenshot of desmos.com/calculator, one per tick, from
+a single 2 h 28 min run. A recorder restart lost ticks 863–885, while `uname -a` was echoing.
 
 ## What runs
 
@@ -75,6 +76,12 @@ Kernel output starts at about tick 176, and the prompt appears at about tick 860
 
 Once the graph is loaded you can save it to your Desmos account, which gives it a shareable link.
 
+To record a time lapse, start Chrome with `--remote-debugging-port=9333` (headless works) and run
+`node tools/record.js build/graph.json build/rec/frames --cmd 'uname -a'`. It loads the graph, saves
+a screenshot every 2 s, types each `--cmd` on the keyboard when bash shows a prompt, and exits after
+the last one. `node tools/timelapse.js build/rec/frames out.mp4` then keeps the last screenshot of each
+tick and encodes them at 30 fps (it needs `ffmpeg`).
+
 Memory: the Desmos evaluator worker uses about 1–2.8 GB of JS heap while it runs, which fits
 desktop Chrome's limit of roughly 4 GB per thread.
 
@@ -125,7 +132,7 @@ prompt.
 | `desmos/` | expression DSL, CPU, terminal, font, and graph assembly |
 | `emu/` | reference machine and console boot runner |
 | `linux/` | kernel config, device tree, `/init`, rootfs files, build scripts, toolchain |
-| `tools/` | image layout, graph build, diff tests, dev server |
+| `tools/` | image layout, graph build, diff tests, dev server, time-lapse recorder |
 | `assets/` | Hershey font, icon, screenshot, time lapse |
 
 The Hershey font is used with attribution; see [assets/font/README](assets/font/README).

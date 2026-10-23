@@ -1,5 +1,3 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
-
 # GNU/Linux in Desmos
 
 A Desmos graph that boots the Linux kernel to a GNU bash shell, which you type into with an on-screen

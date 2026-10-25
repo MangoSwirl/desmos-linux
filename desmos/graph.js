@@ -97,7 +97,7 @@ function buildGraph({ cfg, words, boot, title = 'GNU/Linux on Desmos' }) {
 
   // --------------------------------------------------------------- intro
   text(`${title}\n\nA RISC-V (RV32IMA, Sv32 MMU) computer built entirely from Desmos expressions, running the Linux kernel ` +
-    `with GNU bash, GNU coreutils and the GNU C library.\n\nPress the ▶ play button on the ticker (top of this list) to power on. ` +
+    `with GNU bash, BusyBox and the GNU C library.\n\nPress the ▶ play button on the ticker (top of this list) to power on. ` +
     `Booting to a shell prompt takes over an hour; the console shows kernel messages as they arrive. ` +
     `Type with the on-screen keyboard below the terminal (Shift and Ctrl apply to the next key).\n\n` +
     `How it works: each tick, the ticker action A_t runs thousands of CPU steps through a recursive Desmos function. Memory stores ` +

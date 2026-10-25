@@ -21,12 +21,9 @@ dir /bin 755 0 0
 file /init $U/bin/init 755 0 0
 file /bin/bash $U/bin/bash 755 0 0
 slink /bin/sh bash 777 0 0
-file /bin/coreutils $U/bin/coreutils 755 0 0
+file /bin/busybox $U/bin/busybox 755 0 0
 LIST
-for p in $(cat $U/coreutils-progs.txt); do
-  [ "$p" = ginstall ] && p=install
-  echo "slink /bin/$p coreutils 777 0 0" >> $L
-done
+for p in $(cat $U/busybox-applets.txt); do echo "slink /bin/$p busybox 777 0 0" >> $L; done
 for f in passwd group hostname inputrc motd profile; do echo "file /etc/$f /p/linux/rootfs/etc/$f 644 0 0" >> $L; done
 echo "file /root/README /p/linux/rootfs/root/README 644 0 0" >> $L
 /w/kbuild/usr/gen_init_cpio $L | cat > /w/initramfs.cpio

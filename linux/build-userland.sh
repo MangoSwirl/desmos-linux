@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the GNU userland (static, glibc, rv32ima/ilp32) inside the rvbuild container:
+# Build the userland (GNU bash, BusyBox, init; static, glibc, rv32ima/ilp32) inside the rvbuild container:
 #   docker run --rm -v ~/br:/w -v $PROJECT:/p rvbuild /p/linux/build-userland.sh
 set -euo pipefail
 export PATH=/w/out/host/bin:$PATH
@@ -30,16 +30,25 @@ if [ ! -x $OUT/bin/bash ]; then
   cp bash $OUT/bin/bash && $HOST-strip $OUT/bin/bash
 fi
 
-# --- GNU coreutils (single multi-call binary)
-if [ ! -x $OUT/bin/coreutils ]; then
-  rm -rf /w/tmp/cu && cp -r /w/src/coreutils-9.10 /w/tmp/cu && cd /w/tmp/cu
-  FORCE_UNSAFE_CONFIGURE=1 ./configure --host=$HOST --prefix=/ --enable-single-binary=symlinks \
-    --disable-nls --disable-acl --disable-xattr --disable-libcap --without-selinux --without-openssl \
-    --disable-libsmack --enable-no-install-program=stdbuf,base32,basenc,chcon,chroot,csplit,dir,dircolors,factor,hostid,install,link,logname,mkfifo,mknod,nice,nohup,numfmt,pathchk,pinky,pr,ptx,runcon,shred,shuf,split,sync,tsort,unexpand,users,vdir,who,stty,timeout,expand,fmt,join,od,mktemp,truncate,tac,printenv,nl,paste,comm,shuf \
-    gl_cv_func_working_mktime=yes ac_cv_func_mmap_fixed_mapped=yes > /w/tmp/cu-configure.log
-  make -j4 > /w/tmp/cu-make.log 2>&1 || { tail -40 /w/tmp/cu-make.log; exit 1; }
-  cp src/coreutils $OUT/bin/coreutils && $HOST-strip $OUT/bin/coreutils
-  ./src/coreutils --help >/dev/null 2>&1 || true
-  sed -n 's/^single_binary_progs = //p' Makefile > $OUT/coreutils-progs.txt || true
+# --- BusyBox applets in place of GNU coreutils: a smaller binary, so a smaller initramfs for the
+# kernel to unpack and less to page in on each exec. allnoconfig, then the symbols in busybox.config.
+if [ ! -x $OUT/bin/busybox ]; then
+  rm -rf /w/tmp/bb && cp -r /w/src/busybox-1.37.0 /w/tmp/bb && cd /w/tmp/bb
+  BB="make CROSS_COMPILE=$HOST- CC=$CC"
+  (unset CFLAGS LDFLAGS
+   $BB allnoconfig > /w/tmp/bb-config.log
+   for k in $(grep -oE '^(# )?CONFIG_[A-Z0-9_]+' /p/linux/busybox.config | sed 's/^# //'); do
+     sed -i "/^$k=/d;/^# $k is not set/d" .config
+   done
+   grep -E '^(# )?CONFIG_' /p/linux/busybox.config >> .config
+   { yes '' || true; } | $BB oldconfig >> /w/tmp/bb-config.log
+   while IFS= read -r line; do
+     case "$line" in CONFIG_*|"# CONFIG_"*) grep -qxF "$line" .config || echo "MISSING: $line" ;; esac
+   done < /p/linux/busybox.config
+   $BB -j4 > /w/tmp/bb-make.log 2>&1 || { tail -40 /w/tmp/bb-make.log; exit 1; }
+   $BB busybox.links >> /w/tmp/bb-make.log 2>&1)
+  cp busybox $OUT/bin/busybox && $HOST-strip $OUT/bin/busybox
+  # applet names; bash has its own [[
+  sed 's#.*/##' busybox.links | grep -vxF '[[' > $OUT/busybox-applets.txt
 fi
 ls -la $OUT/bin

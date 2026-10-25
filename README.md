@@ -5,9 +5,9 @@ keyboard in the viewport. The computer is made entirely of ordinary Desmos expre
 (RV32IMA, Sv32 MMU) CPU, 12 MB of RAM held in lists, a VT100-style terminal, and a ticker action
 that drives it all. It needs nothing beyond the stock calculator at desmos.com/calculator.
 
-It is real and it is very slow. Booting to the prompt takes about 860 ticks: around 2 h 20 min in
-desktop Chrome, or 1 h 40 min in headless Chrome on an AWS m7i.xlarge. Starting a program such as
-`uname -a` takes another 60 or so ticks.
+It is real and it is very slow. Booting to the prompt takes about 800 ticks: around 2 h 10 min in
+desktop Chrome, or 1 h 35 min in headless Chrome on an AWS m7i.xlarge. Starting a program such as
+`uname -a` takes another 45 or so ticks.
 
 ![desmos.com/calculator showing the graph at the bash prompt after uname -a and cat /proc/cpuinfo](assets/screenshot.png)
 
@@ -20,8 +20,10 @@ a single 2 h 28 min run. A recorder restart lost ticks 863–885, while `uname -
 
 - **Linux 7.0.14**: a `tinyconfig` kernel plus [linux/kernel.config](linux/kernel.config), with no
   modules, the console on the SBI (`hvc0`), and the initramfs as the root filesystem.
-- **GNU bash 5.2**, **GNU coreutils 9.10** (one multi-call binary) and **GNU libc**, all linked
-  statically for rv32ima/ilp32.
+- **GNU bash 5.2**, **BusyBox 1.37** (the file and text utilities, one multi-call binary) and
+  **GNU libc**, all linked statically for rv32ima/ilp32. BusyBox stands in for GNU coreutils because
+  its binary is about 750 KB smaller, which the kernel then doesn't have to unpack from the
+  initramfs at boot.
 - A tiny `/init` ([linux/init.c](linux/init.c)) that sets up a session on the console and execs bash.
 
 ## How it works
@@ -67,10 +69,10 @@ fetch('https://api.github.com/repos/MangoSwirl/desmos-linux/releases/latest')
 ```
 
 Then press ▶ on the ticker at the top of the expression list. Kernel output starts at about tick
-176, and the prompt appears at about tick 860.
+176, and the prompt appears at about tick 800.
 
 The slider `k_o` sets how many 5000-step chains run per tick. Raising it from 4 to 8 cuts the boot
-to about 530 ticks, and 12 to about 470. Beyond that a tick almost always stops early because its
+to about 510 ticks, and 12 to about 450. Beyond that a tick almost always stops early because its
 write log is full. Each tick takes longer, though, and the keyboard only responds between ticks.
 
 Once the graph is loaded you can save it to your Desmos account, which gives it a shareable link.
@@ -110,7 +112,7 @@ desktop Chrome's limit of roughly 4 GB per thread.
 
 The kernel and userland are cross-compiled inside a Docker image that holds a Buildroot toolchain.
 These steps assume a work directory `~/br` that holds the Buildroot 2026.05.3, linux-7.0.14,
-bash-5.2.37 and coreutils-9.10 sources (the last three under `~/br/src/`).
+bash-5.2.37 and busybox-1.37.0 sources (the last three under `~/br/src/`).
 
 ```sh
 P=$PWD   # this repo
@@ -121,7 +123,7 @@ docker run --rm -v ~/br:/w -v $P:/p rvbuild sh -c \
   'cd /w/buildroot-2026.05.3 && make O=/w/out BR2_DEFCONFIG=/p/linux/toolchain/buildroot.defconfig defconfig && make O=/w/out toolchain'
 
 docker run --rm -v ~/br:/w -v $P:/p rvbuild /p/linux/build-kernel.sh     # -> ~/br/kbuild/arch/riscv/boot/Image
-docker run --rm -v ~/br:/w -v $P:/p rvbuild /p/linux/build-userland.sh   # bash, coreutils, init
+docker run --rm -v ~/br:/w -v $P:/p rvbuild /p/linux/build-userland.sh   # bash, busybox, init
 docker run --rm -v ~/br:/w -v $P:/p rvbuild /p/linux/mkinitramfs.sh      # -> ~/br/initramfs.cpio
 
 # lay out the 12 MB RAM image (kernel, initramfs, device tree) and the CPU parameters

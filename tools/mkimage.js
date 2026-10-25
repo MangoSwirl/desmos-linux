@@ -30,7 +30,11 @@ const kbytes = fs.readFileSync(kernel);
 const ibytes = initrd ? fs.readFileSync(initrd) : Buffer.alloc(0);
 const dtbMax = 0x2000;
 const dtbAddr = RAM_BASE + ramSize - dtbMax;
-const initrdStart = initrd ? Math.floor((dtbAddr - ibytes.length) / 4096) * 4096 : dtbAddr;
+// The kernel's early allocations land just below the initrd, so its start decides which dirty-page
+// sets (page mod dirtySets) they compete with, and that moves the boot by tens of ticks either way.
+// Aligning it to the full span of the sets keeps that fixed as the initrd's size changes.
+const setSpan = Number(arg('--dirty-sets', 32)) * Number(arg('--page-words', 4096)) * 4;
+const initrdStart = initrd ? Math.floor((dtbAddr - ibytes.length) / setSpan) * setSpan : dtbAddr;
 const initrdEnd = initrdStart + ibytes.length;
 if (initrdStart < RAM_BASE + kbytes.length + (1 << 20)) throw new Error('RAM too small for kernel + initrd');
 
